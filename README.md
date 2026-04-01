@@ -1,30 +1,35 @@
 # Crossplane XR Manager
 
-A lightweight, open-source management UI for [Crossplane](https://crossplane.io/) Composite Resources (XRs). Built to fill the gap left by read-only dashboards — this UI lets your team **search, inspect, pause, and resume** claims and their managed resources without touching `kubectl`.
+A lightweight, open-source management UI for [Crossplane](https://crossplane.io/) Composite Resources (XRs). Search, inspect, pause, and resume claims and their managed resources without touching `kubectl`.
 
 ![UI Preview](https://img.shields.io/badge/status-beta-orange) ![License](https://img.shields.io/badge/license-MIT-blue)
 
 ---
 
-## ✨ Features
+## Features
 
+- **Auto-discovers all XRDs** — no configuration needed, works with any Crossplane setup
 - **Search & filter** claims by name, namespace, kind, and status
 - **Status overview** — live ready/paused/error indicators per claim
-- **XR resource tree** — see all managed resources grouped by provider (AWS, Azure, GCP, Kubernetes…)
+- **XR resource tree** — see all managed resources grouped by provider (AWS, Azure, GCP, Kubernetes...)
 - **Pause / Resume claims** — with confirmation modal before applying
 - **Pause / Resume individual managed resources** — granular control with safety confirmation
 - **Conditions tab** — full Kubernetes condition details per claim
 - **Labels & Annotations** — inspect metadata at a glance
-- **YAML view** — generated manifest per claim
+- **YAML view** — actual Kubernetes object manifest
+- **Auto-refresh** — claims list refreshes every 30 seconds
 - **Keyboard shortcut** — press `Esc` to close the detail panel
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
+
+### Prerequisites
+
+- A Kubernetes cluster with Crossplane installed
+- `kubectl` configured to access your cluster
 
 ### Option 1 — Docker (recommended)
-
-**Prerequisites:** Docker, and access to your cluster via `kubectl`.
 
 ```bash
 # 1. Start kubectl proxy so the UI can talk to your cluster
@@ -44,7 +49,6 @@ open http://localhost:8080
 ### Option 2 — Docker Compose
 
 ```bash
-# Clone the repo
 git clone https://github.com/Lobobis/crossplane-xr-manager.git
 cd crossplane-xr-manager
 
@@ -52,7 +56,7 @@ cd crossplane-xr-manager
 kubectl proxy --port=8001 &
 
 # Build and run
-docker compose up -d
+docker compose up -d --build
 
 # Open in browser
 open http://localhost:8080
@@ -61,73 +65,47 @@ open http://localhost:8080
 ### Option 3 — Local Dev (Node.js)
 
 ```bash
-# Clone the repo
 git clone https://github.com/Lobobis/crossplane-xr-manager.git
 cd crossplane-xr-manager
 
-# Install dependencies
 npm install
 
 # Start kubectl proxy
 kubectl proxy --port=8001 &
 
-# Run the dev server
+# Run the dev server (auto-proxies /api to kubectl proxy via setupProxy.js)
 npm start
-# → Opens http://localhost:3000
+# Opens http://localhost:3000
 ```
 
 ---
 
-## ⚙️ Configuration
+## How It Works
 
-### Environment Variables
+1. **Discovery** — On load, the UI queries the Kubernetes API for all `CompositeResourceDefinitions` (XRDs). This tells it what claim types exist on your cluster.
 
-| Variable | Default | Description |
-|---|---|---|
-| `REACT_APP_K8S_API` | `http://localhost:8001` | Base URL of your kubectl proxy or API gateway |
+2. **Listing claims** — For each XRD that defines a claim, it fetches all claim instances across all namespaces. It also fetches the corresponding composite resources (XRs) to get resource counts.
 
-Set at **build time**:
+3. **Resource tree** — When you select a claim, it fetches the XR's `spec.resourceRefs` and resolves each managed resource via the Kubernetes API discovery mechanism. Resources are grouped by provider.
 
-```bash
-docker build \
-  --build-arg REACT_APP_K8S_API=https://my-k8s-proxy.internal \
-  -t crossplane-xr-manager .
+4. **Pause/Resume** — Uses `PATCH` with `application/merge-patch+json` to set or remove the `crossplane.io/paused` annotation. This is the standard Crossplane mechanism for pausing reconciliation.
+
+### Architecture
+
+```
+Browser  -->  nginx (:8080)  --/api/-->  kubectl proxy (:8001)  -->  K8s API
+              serves React app            strips /api prefix
 ```
 
-### Connecting to a Real Cluster
+In dev mode (`npm start`), Create React App's dev server proxies `/api/*` to `kubectl proxy` via `src/setupProxy.js`.
 
-The UI is pre-wired with **mock data** so you can explore it immediately. To connect to your actual Crossplane cluster:
+---
 
-1. **Start `kubectl proxy`** (simplest, for local use):
-   ```bash
-   kubectl proxy --port=8001
-   ```
+## Configuration
 
-2. **Replace the mock fetch calls** in `src/App.jsx`:
+### RBAC (for in-cluster deployment)
 
-   Find the `MOCK_CLAIMS` and `MOCK_XR_TREE` constants at the top of `App.jsx` and replace them with real API calls. Example:
-
-   ```js
-   // Fetch all claims across namespaces
-   const res = await fetch(`${process.env.REACT_APP_K8S_API}/apis/platform.acme.io/v1alpha1/databaseclaims`);
-   const data = await res.json();
-   setClaims(data.items.map(mapClaimFromK8s));
-   ```
-
-3. **Pause/Resume** — the buttons are ready to be wired. The Crossplane pause annotation is:
-   ```json
-   { "metadata": { "annotations": { "crossplane.io/paused": "true" } } }
-   ```
-   Apply with a `PATCH` request:
-   ```bash
-   kubectl patch databaseclaim my-db \
-     --type=merge \
-     -p '{"metadata":{"annotations":{"crossplane.io/paused":"true"}}}'
-   ```
-
-### Running in-cluster (Kubernetes)
-
-For team use, deploy the UI inside your cluster with a `Service` + `Ingress`. Create a `ServiceAccount` with RBAC access to Crossplane CRDs:
+The UI needs read access to XRDs and all claim/XR/MR types, plus patch access for pause/resume:
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -135,27 +113,32 @@ kind: ClusterRole
 metadata:
   name: crossplane-xr-manager-ui
 rules:
+  - apiGroups: ["apiextensions.crossplane.io"]
+    resources: ["compositeresourcedefinitions"]
+    verbs: ["get", "list"]
   - apiGroups: ["*"]
     resources: ["*"]
-    verbs: ["get", "list", "watch", "patch"]  # remove patch to make read-only
+    verbs: ["get", "list", "patch"]
 ```
 
-> ⚠️ **Security note:** `kubectl proxy` has no authentication. For production, use a proper API gateway or in-cluster service with RBAC.
+> **Security note:** `kubectl proxy` has no authentication. For production, deploy inside the cluster with a `ServiceAccount` + RBAC, or use an API gateway with auth.
 
 ---
 
-## 🔌 Kubernetes API Endpoints Used
+## Kubernetes API Endpoints Used
 
-| Resource | API Path |
+| Purpose | API Path |
 |---|---|
-| Claims (XRC) | `/apis/<group>/<version>/namespaces/<ns>/<kind>` |
-| Composite Resources (XR) | `/apis/<group>/<version>/<kind>` |
-| Managed Resources (MR) | `/apis/<provider-group>/<version>/<kind>` |
-| Pause (PATCH) | Same path + `?fieldManager=crossplane-xr-manager` |
+| Discover XRDs | `GET /apis/apiextensions.crossplane.io/v1/compositeresourcedefinitions` |
+| API resource discovery | `GET /apis/{group}/{version}` |
+| List claims | `GET /apis/{group}/{version}/{claimPlural}` |
+| List XRs | `GET /apis/{group}/{version}/{xrPlural}` |
+| Get managed resource | `GET /apis/{group}/{version}/{mrPlural}/{name}` |
+| Pause/Resume (PATCH) | `PATCH .../{name}?fieldManager=crossplane-xr-manager` |
 
 ---
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 - **React 18** — UI framework
 - **No external UI library** — fully custom components, zero dependencies beyond React
@@ -164,18 +147,18 @@ rules:
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 PRs welcome! Some ideas for next steps:
 
-- [ ] Wire real Kubernetes API calls (replace mock data)
-- [ ] Add real-time watch (`?watch=true`) for live updates
+- [ ] Real-time watch (`?watch=true`) for live updates
 - [ ] Multi-cluster support
 - [ ] Composition / XRD browser
 - [ ] Dark/light theme toggle
+- [ ] Events tab per resource
 
 ---
 
-## 📄 License
+## License
 
-MIT © [Lobobis](https://github.com/Lobobis)
+MIT
