@@ -1,0 +1,18 @@
+version: "3.8"
+
+services:
+  crossplane-xr-manager:
+    build:
+      context: .
+      args:
+        # Point to your kubectl proxy - default works if you run:
+        # kubectl proxy --port=8001
+        REACT_APP_K8S_API: http://localhost:8001
+    image: crossplane-xr-manager:latest
+    container_name: crossplane-xr-manager
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    extra_hosts:
+      # Allows the nginx proxy to reach kubectl proxy on your host machine
+      - "host.docker.internal:host-gateway"
