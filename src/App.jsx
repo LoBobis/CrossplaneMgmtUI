@@ -572,19 +572,19 @@ export default function CrossplaneManager() {
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           {lastRefresh && (
             <span style={{ fontSize: 10, color: R.textMuted, marginRight: 8, fontFamily: "monospace" }}>
-              Round {lastRefresh.toLocaleTimeString()}
+              {lastRefresh.toLocaleTimeString()}
             </span>
           )}
-          <button onClick={() => refresh(true)} title="New Round" style={{
+          <button onClick={() => refresh(true)} title="Refresh" style={{
             background: R.bgCard, border: `1px solid ${R.border}`, borderRadius: 4,
             color: R.gold, padding: "5px 12px", cursor: "pointer", fontSize: 13,
             fontFamily: "inherit", fontWeight: 700, display: "flex", alignItems: "center", gap: 4,
             letterSpacing: "0.08em",
-          }}>{"\u{1F514}"} BELL</button>
-          <StatPill label="FIGHTERS" value={stats.total} color={R.gold} />
-          <StatPill label="STANDING" value={stats.ready} color={R.green} />
-          <StatPill label="IN CORNER" value={stats.paused} color={R.amber} />
-          <StatPill label="DOWN" value={stats.error} color={R.red} />
+          }}>{"\u{1F514}"}</button>
+          <StatPill label="TOTAL" value={stats.total} color={R.gold} />
+          <StatPill label="READY" value={stats.ready} color={R.green} />
+          <StatPill label="PAUSED" value={stats.paused} color={R.amber} />
+          <StatPill label="ERROR" value={stats.error} color={R.red} />
         </div>
       </header>
 
@@ -601,7 +601,7 @@ export default function CrossplaneManager() {
               <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: R.textMuted, fontSize: 13 }}>{"\u{1F50D}"}</span>
               <input
                 value={search} onChange={e => setSearch(e.target.value)}
-                placeholder="Search fighters... names, gyms, weight class..."
+                placeholder="Search claims, namespaces, kinds..."
                 style={{
                   width: "100%", background: R.bgInput, border: `1px solid ${R.border}`,
                   borderRadius: 4, padding: "8px 12px 8px 32px", color: R.textPrimary,
@@ -609,8 +609,8 @@ export default function CrossplaneManager() {
                 }}
               />
             </div>
-            <Select value={filterNs} onChange={setFilterNs} options={namespaces} prefix="GYM:" />
-            <Select value={filterKind} onChange={setFilterKind} options={kinds} prefix="CLASS:" />
+            <Select value={filterNs} onChange={setFilterNs} options={namespaces} prefix="NS:" />
+            <Select value={filterKind} onChange={setFilterKind} options={kinds} prefix="KIND:" />
             <Select value={filterStatus} onChange={setFilterStatus}
               options={["all", "ready", "paused", "error"]} prefix="STATUS:" />
           </div>
@@ -629,14 +629,14 @@ export default function CrossplaneManager() {
             {claims.length === 0 && !loading && (
               <div style={{ textAlign: "center", color: R.textMuted, marginTop: 60, fontSize: 14 }}>
                 <div style={{ fontSize: 48, marginBottom: 12 }}>{"\u{1F94A}"}</div>
-                <div style={{ letterSpacing: "0.1em" }}>No fighters in the ring</div>
+                <div style={{ letterSpacing: "0.1em" }}>No claims found</div>
                 <div style={{ fontSize: 11, marginTop: 4, fontFamily: "monospace" }}>No Crossplane claims found on this cluster</div>
               </div>
             )}
             {filtered.length === 0 && claims.length > 0 && (
               <div style={{ textAlign: "center", color: R.textMuted, marginTop: 60, fontSize: 14 }}>
                 <div style={{ fontSize: 48, marginBottom: 12 }}>{"\u{1F94A}"}</div>
-                <div style={{ letterSpacing: "0.1em" }}>No matches on this card</div>
+                <div style={{ letterSpacing: "0.1em" }}>No claims match your filters</div>
               </div>
             )}
             {filtered.map(claim => (
@@ -679,7 +679,7 @@ export default function CrossplaneManager() {
             : `${confirmAction.label} Claim`}
           onCancel={() => { if (!actionLoading) setConfirmAction(null); }}
           onConfirm={executeAction}
-          confirmLabel={actionLoading ? "Fighting..." : confirmAction.label}
+          confirmLabel={actionLoading ? "Working..." : confirmAction.label}
           confirmColor={confirmAction.action === "pause" ? R.amber : R.green}
           confirmDisabled={actionLoading}
         >
@@ -698,15 +698,15 @@ export default function CrossplaneManager() {
               </div>
               <p style={{ color: R.textSecondary, fontSize: 13, margin: 0, fontFamily: "monospace" }}>
                 {confirmAction.action === "pause"
-                  ? <>Throwing in the towel &mdash; setting <code style={{ color: R.goldBright }}>crossplane.io/paused: "true"</code>. Crossplane stops reconciling. The cloud resource stays as-is but drift won't be corrected.</>
-                  : <>Back in the fight! Removing <code style={{ color: R.goldBright }}>crossplane.io/paused</code>. Crossplane resumes reconciling immediately.</>}
+                  ? <>Setting <code style={{ color: R.goldBright }}>crossplane.io/paused: "true"</code> on this managed resource. Crossplane will stop reconciling it &mdash; the cloud resource will remain as-is but drift won't be corrected.</>
+                  : <>Removing the <code style={{ color: R.goldBright }}>crossplane.io/paused</code> annotation. Crossplane will resume reconciling this managed resource immediately.</>}
               </p>
             </div>
           ) : (
             <p style={{ color: R.textSecondary, fontSize: 13, margin: 0, fontFamily: "monospace" }}>
               {confirmAction.action === "pause"
-                ? <>{"\u{1F6CE}\uFE0F"} Sending <strong style={{ color: R.textPrimary }}>{confirmAction.claim.name}</strong> to the corner. All managed resources stop syncing until the bell rings again.</>
-                : <>{"\u{1F514}"} The bell rings! <strong style={{ color: R.textPrimary }}>{confirmAction.claim.name}</strong> is back in the fight. Crossplane resumes reconciling all sub-resources.</>}
+                ? <>Are you sure you want to <strong style={{ color: R.textPrimary }}>pause</strong> reconciliation for <strong style={{ color: R.textPrimary }}>{confirmAction.claim.name}</strong>? All managed resources under this claim will stop syncing until resumed.</>
+                : <>Are you sure you want to <strong style={{ color: R.textPrimary }}>resume</strong> reconciliation for <strong style={{ color: R.textPrimary }}>{confirmAction.claim.name}</strong>? Crossplane will resume reconciling this claim and all sub-resources.</>}
             </p>
           )}
         </Modal>
@@ -818,16 +818,16 @@ function ClaimRow({ claim, selected, compact, onSelect, onPauseToggle }) {
                 color={claim.ready && !claim.paused ? R.green : claim.paused ? R.amber : R.red}
                 bg={claim.ready && !claim.paused ? R.greenDark : claim.paused ? R.amberDark : R.redDark}
               >
-                {claim.paused ? "\u{1F6CE}\uFE0F CORNER" : claim.ready ? "\u{1F3C6} CHAMPION" : "\u{1F94A} FIGHTING"}
+                {claim.paused ? "PAUSED" : claim.ready ? "READY" : "NOT READY"}
               </Badge>
               {claim.resourceCount > 0 && (
-                <Badge color={R.gold} bg={R.bgInput}>{claim.resourceCount} crew</Badge>
+                <Badge color={R.gold} bg={R.bgInput}>{claim.resourceCount} resources</Badge>
               )}
             </>
           )}
           <button
             onClick={e => { e.stopPropagation(); onPauseToggle(); }}
-            title={claim.paused ? "Back in the ring" : "Send to corner"}
+            title={claim.paused ? "Resume reconciliation" : "Pause reconciliation"}
             style={{
               background: claim.paused ? R.amberDark : R.redDark,
               border: `1px solid ${claim.paused ? R.amber + "60" : R.red + "60"}`,
@@ -837,7 +837,7 @@ function ClaimRow({ claim, selected, compact, onSelect, onPauseToggle }) {
               transition: "all 0.15s ease", textTransform: "uppercase",
             }}
           >
-            {claim.paused ? "\u{1F514} BELL" : "\u{1F6CE}\uFE0F CORNER"}
+            {claim.paused ? "\u25B6 RESUME" : "\u23F8 PAUSE"}
           </button>
         </div>
       </div>
@@ -857,7 +857,7 @@ function ClaimRow({ claim, selected, compact, onSelect, onPauseToggle }) {
           {Object.entries(claim.labels).filter(([k]) => !k.startsWith("crossplane.io/")).map(([k, v]) => (
             <Tag key={k}>{k}={v}</Tag>
           ))}
-          <span style={{ fontSize: 10, color: R.textMuted, marginLeft: "auto", fontFamily: "monospace" }}>round: {claim.age}</span>
+          <span style={{ fontSize: 10, color: R.textMuted, marginLeft: "auto", fontFamily: "monospace" }}>age: {claim.age}</span>
         </div>
       )}
     </div>
@@ -892,7 +892,7 @@ function DetailPanel({ claim, xr, loadingTree, onClose, onPauseToggle, onToggleR
               fontFamily: "inherit", fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase",
             }}
           >
-            {claim.paused ? "\u{1F514} RING THE BELL" : "\u{1F6CE}\uFE0F TO THE CORNER"}
+            {claim.paused ? "\u25B6 RESUME CLAIM" : "\u23F8 PAUSE CLAIM"}
           </button>
           <button onClick={onClose} title="Back to card (Esc)" style={{
             background: R.bgInput, border: `1px solid ${R.border}`, borderRadius: 4,
@@ -913,7 +913,7 @@ function DetailPanel({ claim, xr, loadingTree, onClose, onPauseToggle, onToggleR
             borderBottom: `3px solid ${activeTab === tab ? R.gold : "transparent"}`,
             marginBottom: -1, transition: "all 0.15s ease", textTransform: "uppercase",
           }}>
-            {tab === "tree" ? "CREW" : tab === "conditions" ? "STATS" : tab === "labels" ? "PATCHES" : "PLAYBOOK"}
+            {tab.toUpperCase()}
           </button>
         ))}
       </div>
@@ -946,7 +946,7 @@ function DetailPanel({ claim, xr, loadingTree, onClose, onPauseToggle, onToggleR
 function ResourceTree({ xr, claim, onToggleResourcePause, expandedResources, setExpandedResources, showToast, onRefresh }) {
   if (!xr) return (
     <div style={{ color: R.textMuted, fontSize: 13 }}>
-      {claim.xrRef ? "Waiting for the fighter to enter the ring..." : "No composite resource ref found on this claim."}
+      {claim.xrRef ? "No XR data loaded yet." : "No composite resource reference found on this claim."}
     </div>
   );
 
@@ -982,10 +982,10 @@ function ResourceTree({ xr, claim, onToggleResourcePause, expandedResources, set
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
             <div style={{ height: 2, width: 16, background: PROVIDER_COLORS[prov] || R.textMuted }} />
             <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.14em", color: PROVIDER_COLORS[prov] || R.textSecondary }}>
-              CORNER: {prov.toUpperCase()}
+              PROVIDER: {prov.toUpperCase()}
             </span>
             <div style={{ flex: 1, height: 1, background: R.border }} />
-            <span style={{ fontSize: 10, color: R.textMuted }}>{resources.length} fighters</span>
+            <span style={{ fontSize: 10, color: R.textMuted }}>{resources.length} resources</span>
           </div>
           <div style={{ display: "grid", gap: 6 }}>
             {resources.map(res => (
@@ -1054,7 +1054,7 @@ function ManagedResourceCard({ resource, onTogglePause, expanded, onToggleExpand
                 borderBottom: `2px solid ${activeView === v ? R.gold : "transparent"}`,
                 marginBottom: -1, textTransform: "uppercase",
               }}>
-                {v === "info" ? "STATS" : "PLAYBOOK"}
+                {v === "info" ? "INFO" : "YAML"}
               </button>
             ))}
           </div>
@@ -1062,19 +1062,19 @@ function ManagedResourceCard({ resource, onTogglePause, expanded, onToggleExpand
           {activeView === "info" && (
             <div style={{ padding: "10px 14px" }}>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
-                {resource.externalName && <InfoRow label="Ring Name" value={resource.externalName} />}
-                <InfoRow label="Corner" value={resource.provider} />
-                <InfoRow label="Arena" value={resource.region || "\u2014"} />
-                <InfoRow label="Standing" value={resource.ready ? "True" : "False"} color={resource.ready ? R.green : R.red} />
+                {resource.externalName && <InfoRow label="External Name" value={resource.externalName} />}
+                <InfoRow label="Provider" value={resource.provider} />
+                <InfoRow label="Region" value={resource.region || "\u2014"} />
+                <InfoRow label="Ready" value={resource.ready ? "True" : "False"} color={resource.ready ? R.green : R.red} />
                 <InfoRow label="Synced" value={resource.synced ? "True" : "False"} color={resource.synced ? R.green : R.red} />
-                <InfoRow label="In Corner" value={resource.paused ? "True" : "False"} color={resource.paused ? R.amber : R.textMuted} />
-                {resource._error && <InfoRow label="Injury" value={resource._error} color={R.red} />}
+                <InfoRow label="Paused" value={resource.paused ? "True" : "False"} color={resource.paused ? R.amber : R.textMuted} />
+                {resource._error && <InfoRow label="Error" value={resource._error} color={R.red} />}
               </div>
 
               {/* Labels */}
               {labels.length > 0 && (
                 <div style={{ marginTop: 10 }}>
-                  <div style={{ fontSize: 9, color: R.textMuted, letterSpacing: "0.1em", marginBottom: 4 }}>PATCHES</div>
+                  <div style={{ fontSize: 9, color: R.textMuted, letterSpacing: "0.1em", marginBottom: 4 }}>LABELS</div>
                   <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
                     {labels.map(([k, v]) => (
                       <span key={k} style={{
@@ -1090,7 +1090,7 @@ function ManagedResourceCard({ resource, onTogglePause, expanded, onToggleExpand
               {/* Conditions */}
               {resource.conditions && resource.conditions.length > 0 && (
                 <div style={{ marginTop: 10 }}>
-                  <div style={{ fontSize: 9, color: R.textMuted, letterSpacing: "0.1em", marginBottom: 4 }}>FIGHT STATS</div>
+                  <div style={{ fontSize: 9, color: R.textMuted, letterSpacing: "0.1em", marginBottom: 4 }}>CONDITIONS</div>
                   <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
                     {resource.conditions.map((c, i) => (
                       <span key={i} style={{
@@ -1131,7 +1131,7 @@ function ConditionsTab({ claim }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       {claim.conditions.length === 0 && (
-        <div style={{ color: R.textMuted, fontSize: 12 }}>No fight stats reported</div>
+        <div style={{ color: R.textMuted, fontSize: 12 }}>No conditions reported</div>
       )}
       {claim.conditions.map((cond, i) => (
         <div key={i} style={{
@@ -1164,7 +1164,7 @@ function LabelsTab({ claim }) {
   const annotations = Object.entries(claim.annotations);
   return (
     <div>
-      <SectionTitle>Patches (Labels)</SectionTitle>
+      <SectionTitle>Labels</SectionTitle>
       {labels.length > 0 ? (
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 20 }}>
           {labels.map(([k, v]) => (
@@ -1174,7 +1174,7 @@ function LabelsTab({ claim }) {
             </div>
           ))}
         </div>
-      ) : <div style={{ color: R.textMuted, fontSize: 12, marginBottom: 20 }}>No patches on this fighter</div>}
+      ) : <div style={{ color: R.textMuted, fontSize: 12, marginBottom: 20 }}>No labels</div>}
 
       <SectionTitle>Annotations</SectionTitle>
       {annotations.length > 0 ? (
@@ -1242,21 +1242,21 @@ function YAMLEditor({ rawObj, showToast, onRefresh, compact = false }) {
       <div>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
           <span style={{ fontSize: 10, color: R.amber, fontWeight: 700, letterSpacing: "0.1em" }}>
-            {"\u{1F94A}"} EDITING PLAYBOOK (JSON) &mdash; MERGE-PATCH ON APPLY
+            {"\u{1F94A}"} EDITING (JSON) &mdash; MERGE-PATCH ON APPLY
           </span>
           <div style={{ display: "flex", gap: 6 }}>
             <button onClick={cancelEditing} disabled={applying} style={{
               background: R.bgInput, border: `1px solid ${R.border}`, borderRadius: 4,
               color: R.textSecondary, padding: "4px 12px", fontSize: 11, cursor: "pointer",
               fontFamily: "inherit", fontWeight: 600, opacity: applying ? 0.5 : 1,
-            }}>Throw Towel</button>
+            }}>Cancel</button>
             <button onClick={handleApply} disabled={applying} style={{
               background: R.greenDark, border: `1px solid ${R.green}60`, borderRadius: 4,
               color: R.green, padding: "4px 12px", fontSize: 11, cursor: applying ? "not-allowed" : "pointer",
               fontFamily: "inherit", fontWeight: 700, display: "flex", alignItems: "center", gap: 4,
               opacity: applying ? 0.7 : 1, letterSpacing: "0.06em",
             }}>
-              {applying ? <><Spinner size={10} color={R.green} /> Fighting...</> : "\u{1F3C6} Apply"}
+              {applying ? <><Spinner size={10} color={R.green} /> Applying...</> : "\u{1F3C6} Apply"}
             </button>
           </div>
         </div>
@@ -1291,7 +1291,7 @@ function YAMLEditor({ rawObj, showToast, onRefresh, compact = false }) {
           color: R.gold, padding: "4px 12px", fontSize: 11, cursor: "pointer",
           fontFamily: "inherit", fontWeight: 700, letterSpacing: "0.08em",
         }}>
-          {"\u{270E}"} Edit Playbook
+          {"\u{270E}"} Edit
         </button>
       </div>
       <pre style={{
@@ -1336,7 +1336,7 @@ function Modal({ title, children, onCancel, onConfirm, confirmLabel, confirmColo
             color: R.textSecondary, padding: "8px 18px", cursor: confirmDisabled ? "not-allowed" : "pointer",
             fontSize: 12, fontFamily: "inherit", fontWeight: 600, letterSpacing: "0.06em",
             opacity: confirmDisabled ? 0.5 : 1,
-          }}>Walk Away</button>
+          }}>Cancel</button>
           <button onClick={onConfirm} disabled={confirmDisabled} style={{
             background: `${confirmColor}25`, border: `2px solid ${confirmColor}70`,
             borderRadius: 4, color: confirmColor, padding: "8px 18px",
