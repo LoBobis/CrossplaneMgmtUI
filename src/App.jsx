@@ -1,4 +1,39 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+
+// ─── Logger ────────────────────────────────────────────────────────────────
+
+const LOG_MAX = 500;
+const logStore = [];
+let logListeners = [];
+
+function addLog(level, category, message, detail) {
+  const entry = {
+    ts: new Date(),
+    level, // "info" | "warn" | "error" | "success"
+    category, // "api" | "action" | "refresh" | "system"
+    message,
+    detail: detail || null,
+  };
+  logStore.unshift(entry);
+  if (logStore.length > LOG_MAX) logStore.length = LOG_MAX;
+  logListeners.forEach(fn => fn([...logStore]));
+}
+
+function useLogs() {
+  const [logs, setLogs] = useState(() => [...logStore]);
+  useEffect(() => {
+    logListeners.push(setLogs);
+    return () => { logListeners = logListeners.filter(fn => fn !== setLogs); };
+  }, []);
+  return logs;
+}
+
+const log = {
+  info: (cat, msg, detail) => addLog("info", cat, msg, detail),
+  warn: (cat, msg, detail) => addLog("warn", cat, msg, detail),
+  error: (cat, msg, detail) => addLog("error", cat, msg, detail),
+  success: (cat, msg, detail) => addLog("success", cat, msg, detail),
+};
 
 // ─── API Layer ──────────────────────────────────────────────────────────────
 
@@ -6,12 +41,24 @@ const API = "/api";
 const resourceInfoCache = {};
 
 async function k8s(path) {
-  const res = await fetch(`${API}${path}`);
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`${res.status} ${res.statusText}${text ? `: ${text.slice(0, 200)}` : ""}`);
+  const start = performance.now();
+  try {
+    const res = await fetch(`${API}${path}`);
+    const elapsed = Math.round(performance.now() - start);
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      const errMsg = `${res.status} ${res.statusText}${text ? `: ${text.slice(0, 200)}` : ""}`;
+      log.error("api", `GET ${path} → ${res.status} (${elapsed}ms)`, errMsg);
+      throw new Error(errMsg);
+    }
+    log.info("api", `GET ${path} → ${res.status} (${elapsed}ms)`);
+    return res.json();
+  } catch (e) {
+    if (!e.message.match(/^\d{3}/)) {
+      log.error("api", `GET ${path} → FAILED`, e.message);
+    }
+    throw e;
   }
-  return res.json();
 }
 
 async function resolveResourceInfo(group, version, kind) {
@@ -204,6 +251,8 @@ async function loadXRTree(claim) {
 }
 
 async function patchPause(apiVersion, plural, name, namespace, pause) {
+  const action = pause ? "pause" : "resume";
+  log.info("action", `${action.toUpperCase()} ${name} (${plural})`);
   const { group, version } = parseAV(apiVersion);
   const nsPath = namespace ? `/namespaces/${namespace}` : "";
   const base = group ? `/apis/${group}/${version}` : `/api/${version}`;
@@ -214,23 +263,28 @@ async function patchPause(apiVersion, plural, name, namespace, pause) {
     headers: { "Content-Type": "application/merge-patch+json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`${res.status} ${await res.text().catch(() => "")}`);
+  if (!res.ok) {
+    const errText = `${res.status} ${await res.text().catch(() => "")}`;
+    log.error("action", `Failed to ${action} ${name}`, errText);
+    throw new Error(errText);
+  }
+  log.success("action", `${name} ${action}d successfully`);
   return res.json();
 }
 
-// Apply a full resource object (server-side apply via PATCH)
+// Apply a full resource object (merge-patch)
 async function applyResource(obj) {
+  const name = obj.metadata?.name;
+  log.info("action", `APPLY ${name || "unknown"} (${obj.kind})`);
   const { group, version } = parseAV(obj.apiVersion);
   const info = await resolveResourceInfo(group, version, obj.kind);
   if (!info) throw new Error(`Unknown resource kind: ${obj.kind}`);
   const ns = obj.metadata?.namespace;
   const nsPath = ns ? `/namespaces/${ns}` : "";
   const base = group ? `/apis/${group}/${version}` : `/api/${version}`;
-  const name = obj.metadata?.name;
   if (!name) throw new Error("Resource must have metadata.name");
   const url = `${API}${base}${nsPath}/${info.plural}/${name}?fieldManager=crossplane-xr-manager`;
 
-  // Use merge-patch to apply edits
   const res = await fetch(url, {
     method: "PATCH",
     headers: { "Content-Type": "application/merge-patch+json" },
@@ -238,8 +292,10 @@ async function applyResource(obj) {
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
+    log.error("action", `Failed to apply ${name}`, `${res.status}: ${text.slice(0, 300)}`);
     throw new Error(`${res.status}: ${text.slice(0, 300)}`);
   }
+  log.success("action", `${name} applied successfully`);
   return res.json();
 }
 
@@ -282,6 +338,39 @@ function toYaml(v, depth = 0) {
   }).join("\n");
 }
 
+function highlightYaml(yamlStr) {
+  return yamlStr.split("\n").map((line, i) => {
+    // Comment lines
+    if (/^\s*#/.test(line)) return <div key={i}><span style={{ color: "#6a737d" }}>{line}</span></div>;
+    // Lines with "key:" pattern
+    const m = line.match(/^(\s*(?:-\s+)?)([a-zA-Z0-9_./-]+)(:)(.*)/);
+    if (m) {
+      const [, indent, key, colon, rest] = m;
+      let valSpan = null;
+      const val = rest.trim();
+      if (val === "true" || val === "false") valSpan = <span style={{ color: "#ff7b72" }}>{rest}</span>;
+      else if (val === "null" || val === "~") valSpan = <span style={{ color: "#6a737d" }}>{rest}</span>;
+      else if (/^-?\d+(\.\d+)?$/.test(val)) valSpan = <span style={{ color: "#79c0ff" }}>{rest}</span>;
+      else if (/^["']/.test(val)) valSpan = <span style={{ color: "#a5d6ff" }}>{rest}</span>;
+      else if (val) valSpan = <span style={{ color: "#c9d1d9" }}>{rest}</span>;
+      return (
+        <div key={i}>
+          <span>{indent}</span>
+          <span style={{ color: "#d2a8ff" }}>{key}</span>
+          <span style={{ color: "#8b949e" }}>{colon}</span>
+          {valSpan}
+        </div>
+      );
+    }
+    // Array items without keys
+    const arrM = line.match(/^(\s*-\s+)(.*)/);
+    if (arrM) {
+      return <div key={i}><span style={{ color: "#8b949e" }}>{arrM[1]}</span><span style={{ color: "#c9d1d9" }}>{arrM[2]}</span></div>;
+    }
+    return <div key={i}>{line}</div>;
+  });
+}
+
 function cleanRaw(obj) {
   if (!obj) return obj;
   const c = { ...obj };
@@ -310,7 +399,7 @@ function StatusDot({ ready, synced, paused, size = 10 }) {
 function Badge({ children, color = R.textMuted, bg = R.bgPanel }) {
   return (
     <span style={{
-      fontSize: 11, fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase",
+      fontSize: 13, fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase",
       padding: "2px 8px", borderRadius: 3,
       color, background: bg, border: `1px solid ${color}30`,
       display: "inline-flex", alignItems: "center", gap: 4,
@@ -321,7 +410,7 @@ function Badge({ children, color = R.textMuted, bg = R.bgPanel }) {
 function Tag({ children }) {
   return (
     <span style={{
-      fontSize: 10, padding: "1px 6px", borderRadius: 3,
+      fontSize: 12, padding: "1px 6px", borderRadius: 3,
       background: R.bgInput, color: R.textSecondary,
       border: `1px solid ${R.border}`, fontFamily: "monospace",
     }}>{children}</span>
@@ -356,6 +445,7 @@ export default function CrossplaneManager() {
   const [toast, setToast] = useState(null);
   const [expandedResources, setExpandedResources] = useState({});
   const [lastRefresh, setLastRefresh] = useState(null);
+  const [showLogs, setShowLogs] = useState(false);
 
   const showToast = (msg, type = "success") => {
     setToast({ msg, type });
@@ -364,12 +454,32 @@ export default function CrossplaneManager() {
 
   const refresh = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
+    if (!quiet) log.info("refresh", "Loading all claims...");
     try {
       const data = await loadAllClaims();
-      setClaims(data);
+      log.info("refresh", `Loaded ${data.length} claims`);
+      setClaims(prev => {
+        // Merge: only update claims that actually changed (avoids full re-render flicker)
+        if (!prev.length) return data;
+        const prevMap = {};
+        for (const c of prev) prevMap[c.id] = c;
+        let changed = data.length !== prev.length;
+        const merged = data.map(c => {
+          const old = prevMap[c.id];
+          if (!old) { changed = true; return c; }
+          // Compare key fields
+          if (old.ready !== c.ready || old.synced !== c.synced || old.paused !== c.paused ||
+              old.resourceCount !== c.resourceCount || old.age !== c.age) {
+            changed = true; return c;
+          }
+          return old; // keep same reference if unchanged
+        });
+        return changed ? merged : prev;
+      });
       setError(null);
       setLastRefresh(new Date());
     } catch (e) {
+      log.error("refresh", "Failed to load claims", e.message);
       setError(e.message);
     } finally {
       setLoading(false);
@@ -378,12 +488,28 @@ export default function CrossplaneManager() {
 
   // Initial load + auto-refresh
   useEffect(() => {
+    log.info("system", "XR Manager started — connecting to cluster");
     refresh();
-    const interval = setInterval(() => refresh(true), 30000);
+    const interval = setInterval(() => refresh(true), 15000);
     return () => clearInterval(interval);
   }, [refresh]);
 
-  // Load XR tree when claim is selected
+  // Load/refresh XR tree when claim is selected
+  const refreshTree = useCallback(async (claim, quiet = false) => {
+    if (!claim?.xrRef) return;
+    if (!quiet) { setLoadingTree(true); log.info("refresh", `Loading resource tree for ${claim.name}...`); }
+    try {
+      const tree = await loadXRTree(claim);
+      setXrTree(tree);
+      if (!quiet) log.info("refresh", `Resource tree loaded: ${tree?.children?.length || 0} managed resources`);
+    } catch (e) {
+      log.error("refresh", `Failed to load tree for ${claim.name}`, e.message);
+      if (!quiet) showToast(`Failed to load resource tree: ${e.message}`, "error");
+    } finally {
+      setLoadingTree(false);
+    }
+  }, []);
+
   useEffect(() => {
     setXrTree(null);
     if (!selected) return;
@@ -391,16 +517,13 @@ export default function CrossplaneManager() {
     if (!claim?.xrRef) return;
 
     let cancelled = false;
-    setLoadingTree(true);
-    loadXRTree(claim).then(tree => {
-      if (!cancelled) setXrTree(tree);
-    }).catch(e => {
-      if (!cancelled) showToast(`Failed to load resource tree: ${e.message}`, "error");
-    }).finally(() => {
-      if (!cancelled) setLoadingTree(false);
-    });
-    return () => { cancelled = true; };
-  }, [selected, claims]);
+    refreshTree(claim);
+    // Auto-refresh tree every 10s
+    const interval = setInterval(() => {
+      if (!cancelled) refreshTree(claim, true);
+    }, 10000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [selected, claims, refreshTree]);
 
   // ESC to close
   useEffect(() => {
@@ -502,7 +625,7 @@ export default function CrossplaneManager() {
         <div style={{ fontSize: 48 }}>{"\u{1F94A}"}</div>
         <Spinner size={32} />
         <div style={{ fontSize: 16, color: R.textSecondary, letterSpacing: "0.1em", textTransform: "uppercase" }}>Entering the ring...</div>
-        <div style={{ fontSize: 11, color: R.textMuted }}>Connecting to cluster and discovering Crossplane resources</div>
+        <div style={{ fontSize: 13, color: R.textMuted }}>Connecting to cluster and discovering Crossplane resources</div>
         <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
       </div>
     );
@@ -514,8 +637,8 @@ export default function CrossplaneManager() {
         <div style={{ background: R.bgCard, border: `2px solid ${R.red}`, borderRadius: 4, padding: 32, maxWidth: 520, textAlign: "center" }}>
           <div style={{ fontSize: 48, marginBottom: 8 }}>{"\u{1F94A}"}</div>
           <h2 style={{ margin: "0 0 8px", fontSize: 22, color: R.red, textTransform: "uppercase", letterSpacing: "0.1em" }}>Down for the Count!</h2>
-          <p style={{ color: R.textSecondary, fontSize: 13, lineHeight: 1.8, margin: "0 0 20px", fontFamily: "monospace" }}>{error}</p>
-          <div style={{ background: R.bg, borderRadius: 4, padding: 16, textAlign: "left", fontSize: 12, color: R.textSecondary, lineHeight: 2, border: `1px solid ${R.border}` }}>
+          <p style={{ color: R.textSecondary, fontSize: 15, lineHeight: 1.8, margin: "0 0 20px", fontFamily: "monospace" }}>{error}</p>
+          <div style={{ background: R.bg, borderRadius: 4, padding: 16, textAlign: "left", fontSize: 14, color: R.textSecondary, lineHeight: 2, border: `1px solid ${R.border}` }}>
             <div style={{ color: R.gold, fontWeight: 700, marginBottom: 4, letterSpacing: "0.08em" }}>GET BACK UP, CHAMP:</div>
             <div>1. <code style={{ color: R.goldBright }}>kubectl proxy --port=8001</code> is running</div>
             <div>2. Crossplane is installed on your cluster</div>
@@ -523,7 +646,7 @@ export default function CrossplaneManager() {
           </div>
           <button onClick={() => refresh()} style={{
             marginTop: 20, background: R.red, border: "none", borderRadius: 4,
-            color: "#fff", padding: "12px 32px", cursor: "pointer", fontSize: 14, fontFamily: "inherit",
+            color: "#fff", padding: "12px 32px", cursor: "pointer", fontSize: 16, fontFamily: "inherit",
             fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.15em",
           }}>Get Back in the Ring</button>
         </div>
@@ -540,8 +663,9 @@ export default function CrossplaneManager() {
       color: R.textPrimary,
     }}>
       {/* Grunge texture overlay */}
-      <div style={{ position: "fixed", inset: 0, opacity: 0.06, pointerEvents: "none", zIndex: 0,
-        backgroundImage: `url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E")`,
+      <div style={{ position: "fixed", inset: 0, opacity: 0.04, pointerEvents: "none", zIndex: 0,
+        backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='512' height='512'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='512' height='512' filter='url(%23n)'/%3E%3C/svg%3E")`,
+        backgroundRepeat: "repeat", backgroundSize: "512px 512px",
       }} />
 
       {/* Header — The Arena Banner */}
@@ -553,31 +677,37 @@ export default function CrossplaneManager() {
         backdropFilter: "blur(12px)",
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-          <div style={{
+          <div onClick={() => setSelected(null)} style={{
             width: 40, height: 40, borderRadius: 4,
             background: `linear-gradient(135deg, ${R.red}, ${R.gold})`,
             display: "flex", alignItems: "center", justifyContent: "center",
             fontSize: 22, border: `2px solid ${R.gold}60`,
             boxShadow: `0 0 20px ${R.red}40`,
+            cursor: "pointer",
           }}>{"\u{1F94A}"}</div>
           <div>
             <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: "0.12em", color: R.goldBright, textTransform: "uppercase" }}>
               Rocky XR Manager
             </div>
-            <div style={{ fontSize: 10, color: R.textSecondary, letterSpacing: "0.2em", fontWeight: 400 }}>
+            <div style={{ fontSize: 12, color: R.textSecondary, letterSpacing: "0.2em", fontWeight: 400 }}>
               YO ADRIAN, I DID IT! &mdash; COMPOSITE RESOURCE CONTROL PLANE
             </div>
           </div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           {lastRefresh && (
-            <span style={{ fontSize: 10, color: R.textMuted, marginRight: 8, fontFamily: "monospace" }}>
+            <span style={{ fontSize: 12, color: R.textMuted, marginRight: 8, fontFamily: "monospace" }}>
               {lastRefresh.toLocaleTimeString()}
             </span>
           )}
+          <button onClick={() => setShowLogs(v => !v)} title="Toggle Logs" style={{
+            background: showLogs ? `${R.gold}20` : R.bgCard, border: `1px solid ${showLogs ? R.gold + "60" : R.border}`, borderRadius: 4,
+            color: showLogs ? R.goldBright : R.textMuted, padding: "5px 12px", cursor: "pointer", fontSize: 15,
+            fontFamily: "inherit", fontWeight: 700, display: "flex", alignItems: "center", gap: 4,
+          }}>{"\u{1F4CB}"}</button>
           <button onClick={() => refresh(true)} title="Refresh" style={{
             background: R.bgCard, border: `1px solid ${R.border}`, borderRadius: 4,
-            color: R.gold, padding: "5px 12px", cursor: "pointer", fontSize: 13,
+            color: R.gold, padding: "5px 12px", cursor: "pointer", fontSize: 15,
             fontFamily: "inherit", fontWeight: 700, display: "flex", alignItems: "center", gap: 4,
             letterSpacing: "0.08em",
           }}>{"\u{1F514}"}</button>
@@ -598,14 +728,14 @@ export default function CrossplaneManager() {
           {/* Filters */}
           <div style={{ padding: "16px 24px", borderBottom: `1px solid ${R.border}`, display: "flex", gap: 10, flexWrap: "wrap", background: `${R.bgCard}80` }}>
             <div style={{ position: "relative", flex: 1, minWidth: 200 }}>
-              <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: R.textMuted, fontSize: 13 }}>{"\u{1F50D}"}</span>
+              <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: R.textMuted, fontSize: 15 }}>{"\u{1F50D}"}</span>
               <input
                 value={search} onChange={e => setSearch(e.target.value)}
                 placeholder="Search claims, namespaces, kinds..."
                 style={{
                   width: "100%", background: R.bgInput, border: `1px solid ${R.border}`,
                   borderRadius: 4, padding: "8px 12px 8px 32px", color: R.textPrimary,
-                  fontSize: 12, outline: "none", fontFamily: "monospace", boxSizing: "border-box",
+                  fontSize: 14, outline: "none", fontFamily: "monospace", boxSizing: "border-box",
                 }}
               />
             </div>
@@ -618,7 +748,7 @@ export default function CrossplaneManager() {
           {/* Hint */}
           {selected && (
             <div style={{ padding: "6px 24px 0", display: "flex", alignItems: "center", gap: 6 }}>
-              <span style={{ fontSize: 10, color: R.textMuted, letterSpacing: "0.06em" }}>
+              <span style={{ fontSize: 12, color: R.textMuted, letterSpacing: "0.06em" }}>
                 CLICK TO DESELECT &middot; ESC TO LEAVE THE RING
               </span>
             </div>
@@ -627,14 +757,14 @@ export default function CrossplaneManager() {
           {/* Claims list */}
           <div style={{ flex: 1, overflowY: "auto", padding: "12px 24px" }}>
             {claims.length === 0 && !loading && (
-              <div style={{ textAlign: "center", color: R.textMuted, marginTop: 60, fontSize: 14 }}>
+              <div style={{ textAlign: "center", color: R.textMuted, marginTop: 60, fontSize: 16 }}>
                 <div style={{ fontSize: 48, marginBottom: 12 }}>{"\u{1F94A}"}</div>
                 <div style={{ letterSpacing: "0.1em" }}>No claims found</div>
-                <div style={{ fontSize: 11, marginTop: 4, fontFamily: "monospace" }}>No Crossplane claims found on this cluster</div>
+                <div style={{ fontSize: 13, marginTop: 4, fontFamily: "monospace" }}>No Crossplane claims found on this cluster</div>
               </div>
             )}
             {filtered.length === 0 && claims.length > 0 && (
-              <div style={{ textAlign: "center", color: R.textMuted, marginTop: 60, fontSize: 14 }}>
+              <div style={{ textAlign: "center", color: R.textMuted, marginTop: 60, fontSize: 16 }}>
                 <div style={{ fontSize: 48, marginBottom: 12 }}>{"\u{1F94A}"}</div>
                 <div style={{ letterSpacing: "0.1em" }}>No claims match your filters</div>
               </div>
@@ -692,18 +822,18 @@ export default function CrossplaneManager() {
               }}>
                 <StatusDot ready={confirmAction.resource.ready} synced={confirmAction.resource.synced} paused={confirmAction.resource.paused} size={9} />
                 <div>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: R.textPrimary }}>{confirmAction.resource.name}</div>
-                  <div style={{ fontSize: 10, color: R.textSecondary, marginTop: 2 }}>{confirmAction.resource.kind}</div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: R.textPrimary }}>{confirmAction.resource.name}</div>
+                  <div style={{ fontSize: 12, color: R.textSecondary, marginTop: 2 }}>{confirmAction.resource.kind}</div>
                 </div>
               </div>
-              <p style={{ color: R.textSecondary, fontSize: 13, margin: 0, fontFamily: "monospace" }}>
+              <p style={{ color: R.textSecondary, fontSize: 15, margin: 0, fontFamily: "monospace" }}>
                 {confirmAction.action === "pause"
                   ? <>Setting <code style={{ color: R.goldBright }}>crossplane.io/paused: "true"</code> on this managed resource. Crossplane will stop reconciling it &mdash; the cloud resource will remain as-is but drift won't be corrected.</>
                   : <>Removing the <code style={{ color: R.goldBright }}>crossplane.io/paused</code> annotation. Crossplane will resume reconciling this managed resource immediately.</>}
               </p>
             </div>
           ) : (
-            <p style={{ color: R.textSecondary, fontSize: 13, margin: 0, fontFamily: "monospace" }}>
+            <p style={{ color: R.textSecondary, fontSize: 15, margin: 0, fontFamily: "monospace" }}>
               {confirmAction.action === "pause"
                 ? <>Are you sure you want to <strong style={{ color: R.textPrimary }}>pause</strong> reconciliation for <strong style={{ color: R.textPrimary }}>{confirmAction.claim.name}</strong>? All managed resources under this claim will stop syncing until resumed.</>
                 : <>Are you sure you want to <strong style={{ color: R.textPrimary }}>resume</strong> reconciliation for <strong style={{ color: R.textPrimary }}>{confirmAction.claim.name}</strong>? Crossplane will resume reconciling this claim and all sub-resources.</>}
@@ -711,6 +841,9 @@ export default function CrossplaneManager() {
           )}
         </Modal>
       )}
+
+      {/* Logs Panel */}
+      {showLogs && <LogsPanel onClose={() => setShowLogs(false)} />}
 
       {/* Toast */}
       {toast && (
@@ -720,7 +853,7 @@ export default function CrossplaneManager() {
           border: `2px solid ${toast.type === "success" ? R.green : toast.type === "warn" ? R.amber : R.red}60`,
           borderRadius: 4, padding: "12px 18px",
           color: toast.type === "success" ? R.green : toast.type === "warn" ? R.amber : R.red,
-          fontSize: 13, fontWeight: 700, display: "flex", alignItems: "center", gap: 8,
+          fontSize: 15, fontWeight: 700, display: "flex", alignItems: "center", gap: 8,
           animation: "slideUp 0.2s ease", letterSpacing: "0.04em", textTransform: "uppercase",
           boxShadow: `0 4px 24px ${R.bg}`,
         }}>
@@ -744,6 +877,129 @@ export default function CrossplaneManager() {
   );
 }
 
+// ─── Logs Panel ────────────────────────────────────────────────────────────
+
+const LOG_LEVEL_STYLE = {
+  info:    { color: "#79c0ff", icon: "ℹ️",  bg: "#79c0ff10" },
+  warn:    { color: R.amber,   icon: "⚠️",  bg: `${R.amber}10` },
+  error:   { color: R.red,     icon: "❌",  bg: `${R.red}10` },
+  success: { color: R.green,   icon: "✅",  bg: `${R.green}10` },
+};
+
+const LOG_CAT_LABEL = {
+  api: "API", action: "ACTION", refresh: "REFRESH", system: "SYSTEM",
+};
+
+function LogsPanel({ onClose }) {
+  const logs = useLogs();
+  const [filterLevel, setFilterLevel] = useState("all");
+  const [filterCat, setFilterCat] = useState("all");
+  const bottomRef = useRef(null);
+
+  const filtered = useMemo(() => logs.filter(l => {
+    if (filterLevel !== "all" && l.level !== filterLevel) return false;
+    if (filterCat !== "all" && l.category !== filterCat) return false;
+    return true;
+  }), [logs, filterLevel, filterCat]);
+
+  return (
+    <div style={{
+      position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 100,
+      height: 280, background: R.bg, borderTop: `2px solid ${R.gold}40`,
+      display: "flex", flexDirection: "column",
+      animation: "slideUp 0.15s ease",
+    }}>
+      {/* Header */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 10, padding: "8px 16px",
+        borderBottom: `1px solid ${R.border}`, background: R.bgCard, flexShrink: 0,
+      }}>
+        <span style={{ fontSize: 14, fontWeight: 700, color: R.goldBright, letterSpacing: "0.1em", textTransform: "uppercase" }}>
+          {"\u{1F4CB}"} Logs
+        </span>
+        <span style={{ fontSize: 12, color: R.textMuted, fontFamily: "monospace" }}>
+          ({filtered.length}/{logs.length})
+        </span>
+
+        {/* Level filter */}
+        <div style={{ display: "flex", gap: 4, marginLeft: 16 }}>
+          {["all", "info", "warn", "error", "success"].map(lvl => (
+            <button key={lvl} onClick={() => setFilterLevel(lvl)} style={{
+              background: filterLevel === lvl ? `${(LOG_LEVEL_STYLE[lvl]?.color || R.gold)}20` : "transparent",
+              border: `1px solid ${filterLevel === lvl ? (LOG_LEVEL_STYLE[lvl]?.color || R.gold) + "60" : R.border}`,
+              borderRadius: 3, padding: "2px 8px", fontSize: 11, cursor: "pointer",
+              color: filterLevel === lvl ? (LOG_LEVEL_STYLE[lvl]?.color || R.goldBright) : R.textMuted,
+              fontFamily: "inherit", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em",
+            }}>{lvl}</button>
+          ))}
+        </div>
+
+        {/* Category filter */}
+        <div style={{ display: "flex", gap: 4, marginLeft: 8 }}>
+          {["all", "api", "action", "refresh"].map(cat => (
+            <button key={cat} onClick={() => setFilterCat(cat)} style={{
+              background: filterCat === cat ? `${R.gold}15` : "transparent",
+              border: `1px solid ${filterCat === cat ? R.gold + "60" : R.border}`,
+              borderRadius: 3, padding: "2px 8px", fontSize: 11, cursor: "pointer",
+              color: filterCat === cat ? R.goldBright : R.textMuted,
+              fontFamily: "inherit", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em",
+            }}>{LOG_CAT_LABEL[cat] || cat}</button>
+          ))}
+        </div>
+
+        <span style={{ flex: 1 }} />
+
+        <button onClick={() => { logStore.length = 0; addLog("info", "system", "Logs cleared"); }} style={{
+          background: "transparent", border: `1px solid ${R.border}`, borderRadius: 3,
+          color: R.textMuted, padding: "2px 8px", fontSize: 11, cursor: "pointer",
+          fontFamily: "inherit", fontWeight: 600, letterSpacing: "0.06em",
+        }}>CLEAR</button>
+        <button onClick={onClose} style={{
+          background: "transparent", border: "none", color: R.textMuted,
+          cursor: "pointer", fontSize: 16, padding: "2px 6px",
+        }}>{"\u2715"}</button>
+      </div>
+
+      {/* Log entries */}
+      <div style={{ flex: 1, overflowY: "auto", padding: "4px 0", fontFamily: "monospace", fontSize: 12 }}>
+        {filtered.length === 0 && (
+          <div style={{ padding: 16, color: R.textMuted, textAlign: "center" }}>No log entries</div>
+        )}
+        {filtered.map((entry, i) => {
+          const s = LOG_LEVEL_STYLE[entry.level] || LOG_LEVEL_STYLE.info;
+          return (
+            <div key={i} style={{
+              display: "flex", alignItems: "flex-start", gap: 8, padding: "3px 16px",
+              background: i % 2 === 0 ? "transparent" : `${R.bgCard}60`,
+              borderLeft: `3px solid ${s.color}40`,
+            }}>
+              <span style={{ color: R.textMuted, flexShrink: 0, fontSize: 11, minWidth: 72 }}>
+                {entry.ts.toLocaleTimeString()}
+              </span>
+              <span style={{ fontSize: 11, flexShrink: 0, width: 14, textAlign: "center" }}>{s.icon}</span>
+              <span style={{
+                flexShrink: 0, fontSize: 10, padding: "1px 5px", borderRadius: 2, minWidth: 52, textAlign: "center",
+                background: `${s.color}15`, color: s.color, fontWeight: 700, letterSpacing: "0.06em",
+                textTransform: "uppercase",
+              }}>
+                {LOG_CAT_LABEL[entry.category] || entry.category}
+              </span>
+              <span style={{ color: R.textPrimary, flex: 1 }}>{entry.message}</span>
+              {entry.detail && (
+                <span style={{ color: R.textMuted, fontSize: 11, maxWidth: 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                  title={entry.detail}>
+                  {entry.detail}
+                </span>
+              )}
+            </div>
+          );
+        })}
+        <div ref={bottomRef} />
+      </div>
+    </div>
+  );
+}
+
 // ─── Sub Components ─────────────────────────────────────────────────────────
 
 function StatPill({ label, value, color }) {
@@ -753,8 +1009,8 @@ function StatPill({ label, value, color }) {
       background: `${color}12`, border: `1px solid ${color}35`,
       borderRadius: 3, padding: "4px 10px",
     }}>
-      <span style={{ fontSize: 9, color: `${color}99`, letterSpacing: "0.14em", fontWeight: 600 }}>{label}</span>
-      <span style={{ fontSize: 15, fontWeight: 800, color }}>{value}</span>
+      <span style={{ fontSize: 11, color: `${color}99`, letterSpacing: "0.14em", fontWeight: 600 }}>{label}</span>
+      <span style={{ fontSize: 17, fontWeight: 800, color }}>{value}</span>
     </div>
   );
 }
@@ -766,7 +1022,7 @@ function Select({ value, onChange, options, prefix }) {
       style={{
         background: R.bgInput, border: `1px solid ${R.border}`, borderRadius: 4,
         padding: "7px 10px", color: value === "all" ? R.textMuted : R.textPrimary,
-        fontSize: 11, outline: "none", cursor: "pointer", fontFamily: "monospace",
+        fontSize: 13, outline: "none", cursor: "pointer", fontFamily: "monospace",
         letterSpacing: "0.06em", fontWeight: 600,
       }}
     >
@@ -800,12 +1056,12 @@ function ClaimRow({ claim, selected, compact, onSelect, onPauseToggle }) {
           <StatusDot ready={claim.ready} synced={claim.synced} paused={claim.paused} size={9} />
           <div style={{ minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-              <span style={{ fontSize: 14, fontWeight: 700, color: R.textPrimary, letterSpacing: "0.02em", textTransform: "uppercase" }}>
+              <span style={{ fontSize: 16, fontWeight: 700, color: R.textPrimary, letterSpacing: "0.02em", textTransform: "uppercase" }}>
                 {claim.name}
               </span>
               <Tag>{claim.kind}</Tag>
             </div>
-            <div style={{ fontSize: 11, color: R.textSecondary, marginTop: 2, fontFamily: "monospace" }}>
+            <div style={{ fontSize: 13, color: R.textSecondary, marginTop: 2, fontFamily: "monospace" }}>
               {claim.namespace}
             </div>
           </div>
@@ -832,7 +1088,7 @@ function ClaimRow({ claim, selected, compact, onSelect, onPauseToggle }) {
               background: claim.paused ? R.amberDark : R.redDark,
               border: `1px solid ${claim.paused ? R.amber + "60" : R.red + "60"}`,
               borderRadius: 4, color: claim.paused ? R.amber : R.red,
-              padding: "4px 10px", fontSize: 11, cursor: "pointer",
+              padding: "4px 10px", fontSize: 13, cursor: "pointer",
               fontFamily: "inherit", fontWeight: 700, letterSpacing: "0.08em",
               transition: "all 0.15s ease", textTransform: "uppercase",
             }}
@@ -844,7 +1100,7 @@ function ClaimRow({ claim, selected, compact, onSelect, onPauseToggle }) {
 
       {!compact && readyCondition?.message && (
         <div style={{
-          marginTop: 10, fontSize: 11, color: R.textSecondary, fontFamily: "monospace",
+          marginTop: 10, fontSize: 13, color: R.textSecondary, fontFamily: "monospace",
           padding: "6px 10px", background: R.bg, borderRadius: 3,
           borderLeft: `3px solid ${!claim.ready ? R.red + "60" : R.green + "60"}`,
         }}>
@@ -857,7 +1113,7 @@ function ClaimRow({ claim, selected, compact, onSelect, onPauseToggle }) {
           {Object.entries(claim.labels).filter(([k]) => !k.startsWith("crossplane.io/")).map(([k, v]) => (
             <Tag key={k}>{k}={v}</Tag>
           ))}
-          <span style={{ fontSize: 10, color: R.textMuted, marginLeft: "auto", fontFamily: "monospace" }}>age: {claim.age}</span>
+          <span style={{ fontSize: 12, color: R.textMuted, marginLeft: "auto", fontFamily: "monospace" }}>age: {claim.age}</span>
         </div>
       )}
     </div>
@@ -877,7 +1133,7 @@ function DetailPanel({ claim, xr, loadingTree, onClose, onPauseToggle, onToggleR
             <span style={{ fontSize: 18, fontWeight: 700, color: R.goldBright, letterSpacing: "0.06em", textTransform: "uppercase" }}>{claim.name}</span>
             <Tag>{claim.kind}</Tag>
           </div>
-          <div style={{ fontSize: 11, color: R.textSecondary, marginTop: 4, fontFamily: "monospace" }}>
+          <div style={{ fontSize: 13, color: R.textSecondary, marginTop: 4, fontFamily: "monospace" }}>
             {claim.apiVersion} &middot; {claim.namespace} &middot; {claim.age} in the ring
           </div>
         </div>
@@ -888,7 +1144,7 @@ function DetailPanel({ claim, xr, loadingTree, onClose, onPauseToggle, onToggleR
               background: claim.paused ? R.amberDark : R.redDark,
               border: `1px solid ${claim.paused ? R.amber + "60" : R.red + "60"}`,
               borderRadius: 4, color: claim.paused ? R.amber : R.red,
-              padding: "6px 14px", fontSize: 12, cursor: "pointer",
+              padding: "6px 14px", fontSize: 14, cursor: "pointer",
               fontFamily: "inherit", fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase",
             }}
           >
@@ -897,7 +1153,7 @@ function DetailPanel({ claim, xr, loadingTree, onClose, onPauseToggle, onToggleR
           <button onClick={onClose} title="Back to card (Esc)" style={{
             background: R.bgInput, border: `1px solid ${R.border}`, borderRadius: 4,
             color: R.textSecondary, padding: "6px 14px", cursor: "pointer",
-            fontSize: 11, fontFamily: "inherit", fontWeight: 600,
+            fontSize: 13, fontFamily: "inherit", fontWeight: 600,
             display: "flex", alignItems: "center", gap: 6, letterSpacing: "0.08em",
           }}>&larr; BACK</button>
         </div>
@@ -908,7 +1164,7 @@ function DetailPanel({ claim, xr, loadingTree, onClose, onPauseToggle, onToggleR
         {["tree", "conditions", "labels", "yaml"].map(tab => (
           <button key={tab} onClick={() => setActiveTab(tab)} style={{
             background: "none", border: "none", padding: "10px 16px", cursor: "pointer",
-            fontSize: 12, fontFamily: "inherit", fontWeight: 600, letterSpacing: "0.1em",
+            fontSize: 14, fontFamily: "inherit", fontWeight: 600, letterSpacing: "0.1em",
             color: activeTab === tab ? R.goldBright : R.textMuted,
             borderBottom: `3px solid ${activeTab === tab ? R.gold : "transparent"}`,
             marginBottom: -1, transition: "all 0.15s ease", textTransform: "uppercase",
@@ -922,7 +1178,7 @@ function DetailPanel({ claim, xr, loadingTree, onClose, onPauseToggle, onToggleR
         {activeTab === "tree" && (
           loadingTree ? (
             <div style={{ textAlign: "center", padding: 40, color: "#64748b" }}>
-              <Spinner size={20} /><div style={{ marginTop: 10, fontSize: 12 }}>Loading resource tree...</div>
+              <Spinner size={20} /><div style={{ marginTop: 10, fontSize: 14 }}>Loading resource tree...</div>
             </div>
           ) : (
             <ResourceTree
@@ -945,7 +1201,7 @@ function DetailPanel({ claim, xr, loadingTree, onClose, onPauseToggle, onToggleR
 
 function ResourceTree({ xr, claim, onToggleResourcePause, expandedResources, setExpandedResources, showToast, onRefresh }) {
   if (!xr) return (
-    <div style={{ color: R.textMuted, fontSize: 13 }}>
+    <div style={{ color: R.textMuted, fontSize: 15 }}>
       {claim.xrRef ? "No XR data loaded yet." : "No composite resource reference found on this claim."}
     </div>
   );
@@ -967,11 +1223,11 @@ function ResourceTree({ xr, claim, onToggleResourcePause, expandedResources, set
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <StatusDot ready={xr.ready} synced={xr.synced} paused={xr.paused} size={10} />
-          <span style={{ fontSize: 14, fontWeight: 700, color: R.goldBright, letterSpacing: "0.04em", textTransform: "uppercase" }}>{xr.name}</span>
+          <span style={{ fontSize: 16, fontWeight: 700, color: R.goldBright, letterSpacing: "0.04em", textTransform: "uppercase" }}>{xr.name}</span>
           <Tag>{xr.kind}</Tag>
           <Badge color={R.gold} bg={R.bgInput}>{"\u{1F3C6}"} COMPOSITE</Badge>
         </div>
-        <div style={{ fontSize: 11, color: R.textMuted, marginTop: 6, fontFamily: "monospace" }}>
+        <div style={{ fontSize: 13, color: R.textMuted, marginTop: 6, fontFamily: "monospace" }}>
           &uarr; Claim: {claim.name} / {claim.namespace}
         </div>
       </div>
@@ -981,11 +1237,11 @@ function ResourceTree({ xr, claim, onToggleResourcePause, expandedResources, set
         <div key={prov} style={{ marginBottom: 20 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
             <div style={{ height: 2, width: 16, background: PROVIDER_COLORS[prov] || R.textMuted }} />
-            <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.14em", color: PROVIDER_COLORS[prov] || R.textSecondary }}>
+            <span style={{ fontSize: 12, fontWeight: 700, letterSpacing: "0.14em", color: PROVIDER_COLORS[prov] || R.textSecondary }}>
               PROVIDER: {prov.toUpperCase()}
             </span>
             <div style={{ flex: 1, height: 1, background: R.border }} />
-            <span style={{ fontSize: 10, color: R.textMuted }}>{resources.length} resources</span>
+            <span style={{ fontSize: 12, color: R.textMuted }}>{resources.length} resources</span>
           </div>
           <div style={{ display: "grid", gap: 6 }}>
             {resources.map(res => (
@@ -1018,18 +1274,19 @@ function ManagedResourceCard({ resource, onTogglePause, expanded, onToggleExpand
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px" }}>
         <StatusDot ready={resource.ready} synced={resource.synced} paused={resource.paused} size={8} />
-        <span style={{ fontSize: 11, color: R.textSecondary }}>{KIND_ICONS[resource.kind] || "\u{1F94A}"}</span>
-        <span style={{ fontSize: 12, fontWeight: 700, color: R.textPrimary, flex: 1, letterSpacing: "0.02em" }}>{resource.name}</span>
+        <span style={{ fontSize: 13, color: R.textSecondary }}>{KIND_ICONS[resource.kind] || "\u{1F94A}"}</span>
+        <span style={{ fontSize: 14, fontWeight: 700, color: R.textPrimary, letterSpacing: "0.02em" }}>{resource.name}</span>
         <Tag>{resource.kind}</Tag>
-        {resource.region && <span style={{ fontSize: 10, color: R.textMuted, fontFamily: "monospace" }}>{resource.region}</span>}
-        {resource._error && <span style={{ fontSize: 10, color: R.red }} title={resource._error}>&#x26A0;</span>}
+        <span style={{ flex: 1 }} />
+        {resource.region && <span style={{ fontSize: 12, color: R.textMuted, fontFamily: "monospace" }}>{resource.region}</span>}
+        {resource._error && <span style={{ fontSize: 12, color: R.red }} title={resource._error}>&#x26A0;</span>}
         {!resource._error && (
           <button
             onClick={onTogglePause}
             style={{
               background: "none", border: `1px solid ${resource.paused ? R.amber + "40" : R.red + "40"}`,
               borderRadius: 3, color: resource.paused ? R.amber : R.red,
-              padding: "2px 8px", fontSize: 10, cursor: "pointer", fontFamily: "inherit", fontWeight: 700,
+              padding: "2px 8px", fontSize: 12, cursor: "pointer", fontFamily: "inherit", fontWeight: 700,
             }}
           >
             {resource.paused ? "\u{1F514}" : "\u{1F6CE}\uFE0F"}
@@ -1037,7 +1294,7 @@ function ManagedResourceCard({ resource, onTogglePause, expanded, onToggleExpand
         )}
         <button onClick={onToggleExpand} style={{
           background: "none", border: "none", color: R.textMuted,
-          cursor: "pointer", fontSize: 12, padding: "2px 4px",
+          cursor: "pointer", fontSize: 14, padding: "2px 4px",
         }}>
           {expanded ? "\u25B2" : "\u25BC"}
         </button>
@@ -1049,7 +1306,7 @@ function ManagedResourceCard({ resource, onTogglePause, expanded, onToggleExpand
             {["info", "yaml"].map(v => (
               <button key={v} onClick={() => setActiveView(v)} style={{
                 background: "none", border: "none", padding: "6px 12px", cursor: "pointer",
-                fontSize: 10, fontFamily: "inherit", fontWeight: 600, letterSpacing: "0.1em",
+                fontSize: 12, fontFamily: "inherit", fontWeight: 600, letterSpacing: "0.1em",
                 color: activeView === v ? R.goldBright : R.textMuted,
                 borderBottom: `2px solid ${activeView === v ? R.gold : "transparent"}`,
                 marginBottom: -1, textTransform: "uppercase",
@@ -1074,11 +1331,11 @@ function ManagedResourceCard({ resource, onTogglePause, expanded, onToggleExpand
               {/* Labels */}
               {labels.length > 0 && (
                 <div style={{ marginTop: 10 }}>
-                  <div style={{ fontSize: 9, color: R.textMuted, letterSpacing: "0.1em", marginBottom: 4 }}>LABELS</div>
+                  <div style={{ fontSize: 11, color: R.textMuted, letterSpacing: "0.1em", marginBottom: 4 }}>LABELS</div>
                   <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
                     {labels.map(([k, v]) => (
                       <span key={k} style={{
-                        fontSize: 10, padding: "1px 6px", borderRadius: 3,
+                        fontSize: 12, padding: "1px 6px", borderRadius: 3,
                         background: R.bgInput, color: R.textSecondary,
                         border: `1px solid ${R.border}`, fontFamily: "monospace",
                       }}>{k}={v}</span>
@@ -1090,11 +1347,11 @@ function ManagedResourceCard({ resource, onTogglePause, expanded, onToggleExpand
               {/* Conditions */}
               {resource.conditions && resource.conditions.length > 0 && (
                 <div style={{ marginTop: 10 }}>
-                  <div style={{ fontSize: 9, color: R.textMuted, letterSpacing: "0.1em", marginBottom: 4 }}>CONDITIONS</div>
+                  <div style={{ fontSize: 11, color: R.textMuted, letterSpacing: "0.1em", marginBottom: 4 }}>CONDITIONS</div>
                   <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
                     {resource.conditions.map((c, i) => (
                       <span key={i} style={{
-                        fontSize: 10, padding: "1px 6px", borderRadius: 3,
+                        fontSize: 12, padding: "1px 6px", borderRadius: 3,
                         background: c.status === "True" ? R.greenDark + "80" : R.redDark + "80",
                         color: c.status === "True" ? R.green : R.red,
                         border: `1px solid ${c.status === "True" ? R.green + "30" : R.red + "30"}`,
@@ -1121,8 +1378,8 @@ function ManagedResourceCard({ resource, onTogglePause, expanded, onToggleExpand
 function InfoRow({ label, value, color }) {
   return (
     <div>
-      <div style={{ fontSize: 9, color: R.textMuted, letterSpacing: "0.1em", marginBottom: 2, fontWeight: 600 }}>{label.toUpperCase()}</div>
-      <div style={{ fontSize: 11, color: color || R.textSecondary, fontWeight: 700, wordBreak: "break-all", fontFamily: "monospace" }}>{value}</div>
+      <div style={{ fontSize: 11, color: R.textMuted, letterSpacing: "0.1em", marginBottom: 2, fontWeight: 600 }}>{label.toUpperCase()}</div>
+      <div style={{ fontSize: 13, color: color || R.textSecondary, fontWeight: 700, wordBreak: "break-all", fontFamily: "monospace" }}>{value}</div>
     </div>
   );
 }
@@ -1131,7 +1388,7 @@ function ConditionsTab({ claim }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       {claim.conditions.length === 0 && (
-        <div style={{ color: R.textMuted, fontSize: 12 }}>No conditions reported</div>
+        <div style={{ color: R.textMuted, fontSize: 14 }}>No conditions reported</div>
       )}
       {claim.conditions.map((cond, i) => (
         <div key={i} style={{
@@ -1140,7 +1397,7 @@ function ConditionsTab({ claim }) {
           borderLeft: `4px solid ${cond.status === "True" ? R.green : R.red}`,
         }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-            <span style={{ fontSize: 14, fontWeight: 700, color: R.textPrimary, letterSpacing: "0.06em", textTransform: "uppercase" }}>{cond.type}</span>
+            <span style={{ fontSize: 16, fontWeight: 700, color: R.textPrimary, letterSpacing: "0.06em", textTransform: "uppercase" }}>{cond.type}</span>
             <Badge
               color={cond.status === "True" ? R.green : R.red}
               bg={cond.status === "True" ? R.greenDark : R.redDark}
@@ -1168,25 +1425,25 @@ function LabelsTab({ claim }) {
       {labels.length > 0 ? (
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 20 }}>
           {labels.map(([k, v]) => (
-            <div key={k} style={{ display: "flex", borderRadius: 3, overflow: "hidden", fontSize: 11 }}>
+            <div key={k} style={{ display: "flex", borderRadius: 3, overflow: "hidden", fontSize: 13 }}>
               <span style={{ background: R.bgPanel, padding: "4px 8px", color: R.textSecondary }}>{k}</span>
               <span style={{ background: R.bgInput, padding: "4px 8px", color: R.textPrimary, border: `1px solid ${R.border}` }}>{v}</span>
             </div>
           ))}
         </div>
-      ) : <div style={{ color: R.textMuted, fontSize: 12, marginBottom: 20 }}>No labels</div>}
+      ) : <div style={{ color: R.textMuted, fontSize: 14, marginBottom: 20 }}>No labels</div>}
 
       <SectionTitle>Annotations</SectionTitle>
       {annotations.length > 0 ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {annotations.map(([k, v]) => (
-            <div key={k} style={{ display: "flex", borderRadius: 3, overflow: "hidden", fontSize: 11 }}>
+            <div key={k} style={{ display: "flex", borderRadius: 3, overflow: "hidden", fontSize: 13 }}>
               <span style={{ background: R.bgPanel, padding: "4px 8px", color: R.textSecondary, minWidth: 140 }}>{k}</span>
               <span style={{ background: R.bgInput, padding: "4px 8px", color: R.textPrimary, border: `1px solid ${R.border}`, flex: 1, fontFamily: "monospace", wordBreak: "break-all" }}>{v}</span>
             </div>
           ))}
         </div>
-      ) : <div style={{ color: R.textMuted, fontSize: 12 }}>No annotations</div>}
+      ) : <div style={{ color: R.textMuted, fontSize: 14 }}>No annotations</div>}
     </div>
   );
 }
@@ -1241,18 +1498,18 @@ function YAMLEditor({ rawObj, showToast, onRefresh, compact = false }) {
     return (
       <div>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-          <span style={{ fontSize: 10, color: R.amber, fontWeight: 700, letterSpacing: "0.1em" }}>
+          <span style={{ fontSize: 12, color: R.amber, fontWeight: 700, letterSpacing: "0.1em" }}>
             {"\u{1F94A}"} EDITING (JSON) &mdash; MERGE-PATCH ON APPLY
           </span>
           <div style={{ display: "flex", gap: 6 }}>
             <button onClick={cancelEditing} disabled={applying} style={{
               background: R.bgInput, border: `1px solid ${R.border}`, borderRadius: 4,
-              color: R.textSecondary, padding: "4px 12px", fontSize: 11, cursor: "pointer",
+              color: R.textSecondary, padding: "4px 12px", fontSize: 13, cursor: "pointer",
               fontFamily: "inherit", fontWeight: 600, opacity: applying ? 0.5 : 1,
             }}>Cancel</button>
             <button onClick={handleApply} disabled={applying} style={{
               background: R.greenDark, border: `1px solid ${R.green}60`, borderRadius: 4,
-              color: R.green, padding: "4px 12px", fontSize: 11, cursor: applying ? "not-allowed" : "pointer",
+              color: R.green, padding: "4px 12px", fontSize: 13, cursor: applying ? "not-allowed" : "pointer",
               fontFamily: "inherit", fontWeight: 700, display: "flex", alignItems: "center", gap: 4,
               opacity: applying ? 0.7 : 1, letterSpacing: "0.06em",
             }}>
@@ -1263,7 +1520,7 @@ function YAMLEditor({ rawObj, showToast, onRefresh, compact = false }) {
         {parseError && (
           <div style={{
             background: R.redDark, border: `1px solid ${R.red}60`, borderRadius: 4,
-            padding: "8px 12px", marginBottom: 8, fontSize: 11, color: R.red,
+            padding: "8px 12px", marginBottom: 8, fontSize: 13, color: R.red,
             whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "monospace",
           }}>{parseError}</div>
         )}
@@ -1274,7 +1531,7 @@ function YAMLEditor({ rawObj, showToast, onRefresh, compact = false }) {
           style={{
             width: "100%", minHeight: compact ? 250 : 400, background: R.bg,
             border: `1px solid ${R.gold}40`, borderRadius: 4,
-            padding: 14, fontSize: 11, color: R.textPrimary, resize: "vertical",
+            padding: 14, fontSize: 13, color: R.textPrimary, resize: "vertical",
             lineHeight: 1.6, margin: 0, fontFamily: "monospace",
             outline: "none", boxSizing: "border-box",
           }}
@@ -1288,7 +1545,7 @@ function YAMLEditor({ rawObj, showToast, onRefresh, compact = false }) {
       <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8 }}>
         <button onClick={startEditing} style={{
           background: R.bgPanel, border: `1px solid ${R.gold}40`, borderRadius: 4,
-          color: R.gold, padding: "4px 12px", fontSize: 11, cursor: "pointer",
+          color: R.gold, padding: "4px 12px", fontSize: 13, cursor: "pointer",
           fontFamily: "inherit", fontWeight: 700, letterSpacing: "0.08em",
         }}>
           {"\u{270E}"} Edit
@@ -1296,12 +1553,12 @@ function YAMLEditor({ rawObj, showToast, onRefresh, compact = false }) {
       </div>
       <pre style={{
         background: R.bg, border: `1px solid ${R.border}`, borderRadius: 4,
-        padding: compact ? 12 : 18, fontSize: 11, color: R.textSecondary, overflowX: "auto",
+        padding: compact ? 12 : 18, fontSize: 13, color: R.textSecondary, overflowX: "auto",
         lineHeight: 1.7, margin: 0, fontFamily: "monospace",
         whiteSpace: "pre-wrap", wordBreak: "break-word",
         maxHeight: compact ? 300 : undefined,
       }}>
-        {yamlView}
+        {highlightYaml(yamlView)}
       </pre>
     </div>
   );
@@ -1309,7 +1566,7 @@ function YAMLEditor({ rawObj, showToast, onRefresh, compact = false }) {
 
 function SectionTitle({ children }) {
   return (
-    <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.14em", color: R.gold, marginBottom: 10, textTransform: "uppercase" }}>
+    <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: "0.14em", color: R.gold, marginBottom: 10, textTransform: "uppercase" }}>
       {children}
     </div>
   );
@@ -1334,14 +1591,14 @@ function Modal({ title, children, onCancel, onConfirm, confirmLabel, confirmColo
           <button onClick={onCancel} disabled={confirmDisabled} style={{
             background: R.bgInput, border: `1px solid ${R.border}`, borderRadius: 4,
             color: R.textSecondary, padding: "8px 18px", cursor: confirmDisabled ? "not-allowed" : "pointer",
-            fontSize: 12, fontFamily: "inherit", fontWeight: 600, letterSpacing: "0.06em",
+            fontSize: 14, fontFamily: "inherit", fontWeight: 600, letterSpacing: "0.06em",
             opacity: confirmDisabled ? 0.5 : 1,
           }}>Cancel</button>
           <button onClick={onConfirm} disabled={confirmDisabled} style={{
             background: `${confirmColor}25`, border: `2px solid ${confirmColor}70`,
             borderRadius: 4, color: confirmColor, padding: "8px 18px",
             cursor: confirmDisabled ? "not-allowed" : "pointer",
-            fontSize: 12, fontFamily: "inherit", fontWeight: 800, letterSpacing: "0.1em",
+            fontSize: 14, fontFamily: "inherit", fontWeight: 800, letterSpacing: "0.1em",
             textTransform: "uppercase",
             opacity: confirmDisabled ? 0.7 : 1,
           }}>{confirmLabel}</button>
