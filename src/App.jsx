@@ -151,20 +151,26 @@ const R = {
 
 async function loadAllClaims() {
   const xrds = (await k8s("/apis/apiextensions.crossplane.io/v1/compositeresourcedefinitions")).items;
+  log.info("refresh", `Discovered ${xrds.length} XRDs`);
   const allClaims = [];
 
   await Promise.allSettled(xrds.map(async (xrd) => {
     const claimNames = xrd.spec.claimNames;
-    if (!claimNames) return;
+    if (!claimNames) {
+      log.info("refresh", `XRD ${xrd.metadata.name} has no claimNames (composite-only), skipping`);
+      return;
+    }
 
     const group = xrd.spec.group;
     const ver = xrd.spec.versions?.find(v => v.served)?.name || "v1alpha1";
+    log.info("refresh", `Fetching claims: ${group}/${ver}/${claimNames.plural}`);
 
     try {
       const [claimData, xrData] = await Promise.all([
         k8s(`/apis/${group}/${ver}/${claimNames.plural}`),
         k8s(`/apis/${group}/${ver}/${xrd.spec.names.plural}`).catch(() => ({ items: [] })),
       ]);
+      log.info("refresh", `Found ${claimData.items.length} ${claimNames.plural} claims`);
 
       const xrMap = {};
       for (const xr of xrData.items) xrMap[xr.metadata.name] = xr;
@@ -198,7 +204,7 @@ async function loadAllClaims() {
         });
       }
     } catch (e) {
-      console.warn(`Failed to fetch ${group}/${claimNames.plural}:`, e);
+      log.error("refresh", `Failed to fetch ${group}/${claimNames.plural}`, e.message);
     }
   }));
 
