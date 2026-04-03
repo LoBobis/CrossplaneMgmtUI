@@ -17,6 +17,7 @@ export const CLAIMS_REFRESH_INTERVAL_MS = 15_000;
 export const TREE_REFRESH_INTERVAL_MS = 10_000;
 
 // UI
+export const EVENTS_REFRESH_INTERVAL_MS = 15_000;
 export const TOAST_DURATION_MS = 3200;
 export const LOG_MAX_ENTRIES = 500;
 export const LEFT_PANEL_WIDTH = "42%";

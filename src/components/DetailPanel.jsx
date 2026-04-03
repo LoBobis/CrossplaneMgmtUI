@@ -4,6 +4,7 @@ import { SOURCE_XR } from "../config";
 import { StatusDot, Tag, Spinner } from "./Primitives";
 import { ResourceTree } from "./ResourceTree";
 import { ConditionsTab } from "./ConditionsTab";
+import { EventsTab } from "./EventsTab";
 import { LabelsTab } from "./LabelsTab";
 import { YAMLEditor } from "./YAMLEditor";
 
@@ -48,7 +49,7 @@ export function DetailPanel({ entry, xr, loadingTree, onClose, onPauseToggle, on
       </div>
 
       <div style={{ display: "flex", gap: 0, borderBottom: `1px solid ${R.border}`, padding: "0 24px" }}>
-        {["tree", "conditions", "labels", "yaml"].map(tab => (
+        {["tree", "conditions", "events", "labels", "yaml"].map(tab => (
           <button key={tab} onClick={() => setActiveTab(tab)} style={{
             background: "none", border: "none", padding: "10px 16px", cursor: "pointer",
             fontSize: 14, fontFamily: "inherit", fontWeight: 600, letterSpacing: "0.1em",
@@ -79,6 +80,7 @@ export function DetailPanel({ entry, xr, loadingTree, onClose, onPauseToggle, on
           )
         )}
         {activeTab === "conditions" && <ConditionsTab entry={entry} />}
+        {activeTab === "events" && <EventsTab entry={entry} />}
         {activeTab === "labels" && <LabelsTab entry={entry} />}
         {activeTab === "yaml" && <YAMLEditor rawObj={entry._raw} showToast={showToast} onRefresh={onRefresh} />}
       </div>

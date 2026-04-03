@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { theme as R, KIND_ICONS } from "../theme";
 import { StatusDot, Tag, InfoRow } from "./Primitives";
 import { YAMLEditor } from "./YAMLEditor";
+import { EventsCompact } from "./EventsTab";
 
 export function ManagedResourceCard({ resource, onTogglePause, expanded, onToggleExpand, showToast, onRefresh }) {
   const [activeView, setActiveView] = useState("info");
@@ -43,7 +44,7 @@ export function ManagedResourceCard({ resource, onTogglePause, expanded, onToggl
       {expanded && (
         <div style={{ borderTop: `1px solid ${R.border}`, background: R.bgCard }}>
           <div style={{ display: "flex", gap: 0, borderBottom: `1px solid ${R.border}`, padding: "0 14px" }}>
-            {["info", "yaml"].map(v => (
+            {["info", "events", "yaml"].map(v => (
               <button key={v} onClick={() => setActiveView(v)} style={{
                 background: "none", border: "none", padding: "6px 12px", cursor: "pointer",
                 fontSize: 12, fontFamily: "inherit", fontWeight: 600, letterSpacing: "0.1em",
@@ -51,7 +52,7 @@ export function ManagedResourceCard({ resource, onTogglePause, expanded, onToggl
                 borderBottom: `2px solid ${activeView === v ? R.gold : "transparent"}`,
                 marginBottom: -1, textTransform: "uppercase",
               }}>
-                {v === "info" ? "INFO" : "YAML"}
+                {v.toUpperCase()}
               </button>
             ))}
           </div>
@@ -100,6 +101,14 @@ export function ManagedResourceCard({ resource, onTogglePause, expanded, onToggl
                 </div>
               )}
             </div>
+          )}
+
+          {activeView === "events" && (
+            <EventsCompact
+              name={resource.name}
+              kind={resource.kind}
+              namespace={resource._raw?.metadata?.namespace || null}
+            />
           )}
 
           {activeView === "yaml" && resource._raw && (
